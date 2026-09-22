@@ -1,0 +1,57 @@
+rules_version = '2';
+
+// Access model (single-household v1)
+// ----------------------------------
+// Google sign-in is open to anyone, so "signed in" is NOT enough to see data.
+// Membership is an allowlist: a document per permitted uid in `household/`.
+//
+//   household/{uid}  { role: "patient" | "viewer" }   (created by the operator)
+//
+// The one "patient" owns the shared record (users/{patientUid}/logs) and is
+// the only account that can write it. "viewer" accounts are read-only.
+// Glucose readings are written solely by the pollGlucose Cloud Function via
+// the Admin SDK, which bypasses these rules; clients can never write them.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function memberDoc(uid) {
+      return /databases/$(database)/documents/household/$(uid);
+    }
+
+    function isMember() {
+      return signedIn() && exists(memberDoc(request.auth.uid));
+    }
+
+    function isPatientUid(uid) {
+      return exists(memberDoc(uid)) && get(memberDoc(uid)).data.role == "patient";
+    }
+
+    // A member may look up their own membership (useful for a future
+    // "you're not part of this household" screen). Only the operator edits it.
+    match /household/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    match /readings/{readingId} {
+      allow read: if isMember();
+      allow write: if false;
+    }
+
+    // Per-user tree. Owners read/write their own; every member may also read
+    // the patient's tree (that is the household sharing).
+    match /users/{uid} {
+      allow read: if isMember() && (request.auth.uid == uid || isPatientUid(uid));
+      allow write: if isMember() && request.auth.uid == uid;
+      match /{sub=**} {
+        allow read: if isMember() && (request.auth.uid == uid || isPatientUid(uid));
+        allow write: if isMember() && request.auth.uid == uid;
+      }
+    }
+  }
+}
